@@ -6,7 +6,7 @@ from torch import nn
 import torch
 import torch.nn.functional as F
 import math
-
+#这个条件U-net就是输入带噪图x，时间步t，外加一个文本条件，输出预测的噪声
 
 def exists(x):
     return x is not None
@@ -23,12 +23,12 @@ def Upsample(dim, dim_out=None):
     return nn.Sequential(
         nn.Upsample(scale_factor=2, mode="bilinear"),
         nn.Conv2d(dim, default(dim_out, dim), 3, padding=1),
-    )
+    ) #双线性插值翻倍分辨率再卷积
 
 
 def Downsample(dim, dim_out=None):
     """Downsample the image feature resolution a factor of 2."""
-    return nn.Conv2d(dim, default(dim_out, dim), kernel_size=2, stride=2)
+    return nn.Conv2d(dim, default(dim_out, dim), kernel_size=2, stride=2) #stride =2分辨率减半，改通道数
 
 
 class RMSNorm(nn.Module):
@@ -44,7 +44,7 @@ class RMSNorm(nn.Module):
 
 
 class SinusoidalPosEmb(nn.Module):
-    """Sinusoidal position embedding for time steps."""
+    """Sinusoidal position embedding for time steps. 把时间步t编成一个向量"""
 
     def __init__(self, dim):
         super().__init__()
@@ -147,7 +147,7 @@ class Unet(nn.Module):
             nn.Linear(dim, context_dim),
             nn.GELU(),
             nn.Linear(context_dim, context_dim),
-        )
+        ) #timestep通过这个升到同样的维度
 
         # Encoding condition (i.e. text embedding) as context
         self.condition_dim = condition_dim
@@ -155,7 +155,7 @@ class Unet(nn.Module):
             nn.Linear(condition_dim, context_dim),
             nn.GELU(),
             nn.Linear(context_dim, context_dim),
-        )
+        ) #文本条件过这个升到同样的维度
 
         # Probability of dropping the condition during training
         self.uncond_prob = uncond_prob
@@ -180,7 +180,12 @@ class Unet(nn.Module):
             # Make sure to exactly follow this structure of ModuleList in order to
             # load a pretrained checkpoint.
             ##################################################################
-
+            down_block =nn.ModuleList([ResnetBlock(dim_in,dim_in,context_dim=context_dim),
+                                       ResnetBlock(dim_in,dim_in,context_dim=context_dim),
+                                       Downsample(dim_in,dim_out)
+                                       ])
+            #ResnetBlock在当前分辨率上提特征，两个block是为了学到更复杂的东西
+            #Downsample吧分辨率减半，进入下一个尺度，它用 stride=2 的卷积,把 H、W 各砍一半(比如 64×64 → 32×32),顺便把通道数从 dim_in 升到 dim_out
             ##################################################################
             self.downs.append(down_block)
 
@@ -204,7 +209,10 @@ class Unet(nn.Module):
             # Don't forget to account for the skip connections by having 2 x dim_out
             # channels at the input of both ResnetBlocks.
             ##################################################################
-
+            up_block = nn.ModuleList([Upsample(dim_in,dim_out),
+                                      ResnetBlock(dim_out*2,dim_out,context_dim), #为什么*2.，是因为每层都要把左边skip特征concat过来
+                                      ResnetBlock(dim_out*2,dim_out,context_dim)
+                                      ])
             self.ups.append(up_block)
             ##################################################################
 
@@ -226,6 +234,13 @@ class Unet(nn.Module):
         # You will have to call self.forward two times.
         # For unconditional sampling, pass None in`text_emb`.
         ##################################################################
+        eps_cond = self.forward(x,time,model_kwargs) #条件预测
+
+        uncond_kwargs = copy.deepcopy(model_kwargs)
+        uncond_kwargs["text_emb"] = None
+        eps_uncond = self.forward(x,time,uncond_kwargs)
+
+        x = (cfg_scale+1)*eps_cond - cfg_scale * eps_uncond
 
         ##################################################################
 
@@ -247,7 +262,7 @@ class Unet(nn.Module):
             return self.cfg_forward(x, time, model_kwargs)
 
         # Embed time step
-        context = self.time_mlp(time)
+        context = self.time_mlp(time) #t编码之后过一下time_mlp升到context_dim
 
         # Embed condition and add to context
         cond_emb = model_kwargs["text_emb"]
@@ -258,7 +273,7 @@ class Unet(nn.Module):
             mask = (torch.rand(cond_emb.shape[0]) > self.uncond_prob).float()
             mask = mask[:, None].to(cond_emb.device)  # B x 1
             cond_emb = cond_emb * mask
-        context = context + self.condition_mlp(cond_emb)
+        context = context + self.condition_mlp(cond_emb) #文本条件+时间步编码
 
         # Initial convolution
         x = self.init_conv(x)
@@ -281,6 +296,27 @@ class Unet(nn.Module):
         #      skip connection from the downsampling path.
         #    - Make sure to pass the context to each ResNet block.
         ##################################################################
+        #Downsampling
+        skips = [] #栈 先进后出
+        for resnet1,resnet2,downsample in self.downs:
+            x = resnet1(x,context)
+            skips.append(x)
+            x = resnet2(x,context)
+            skips.append(x)
+            x = downsample(x)
+        
+        #Middle
+        x = self.mid_block1(x,context)
+        x = self.mid_block2(x,context)
+
+        #Upsampling
+        for upsample, resnet1,resnet2 in self.ups:
+            x = upsample(x)
+            x = torch.cat((x,skips.pop()),dim = 1)
+            x = resnet1(x,context)
+            x = torch.cat((x,skips.pop()),dim = 1)
+            x = resnet2(x,context)
+        
 
         ##################################################################
 

@@ -39,10 +39,10 @@ class PositionalEncoding(nn.Module):
         pos = torch.arange(max_len).unsqueeze(1) #(len,1)
         even_list = torch.arange(0,embed_dim,2) #(embed_dim/2,)
 
-
-        div_term = 10000.0 **(even_list / embed_dim)  #(embed_dim/2,)
+        div_term = 10000.0 **(even_list / embed_dim)  #(embed_dim/2,) 
         pe[0,:,0::2] = torch.sin(pos/div_term)   # pos/div_term is (len,embed_dim/2)
         pe[0,:,1::2] = torch.cos(pos/div_term)   #从位置1开始，每步跳2格
+        #两两成对，一正弦一余弦
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -183,9 +183,9 @@ class MultiHeadAttention(nn.Module):
         output = attn_weights@V
         output = torch.permute(output,(0,2,1,3))
         output = output.contiguous()
-        output= torch.reshape(output,(N,S,E))
+        output= torch.reshape(output,(N,S,E)) #合并头
 
-        output = self.proj(output)
+        output = self.proj(output) #线性映射 将不同头提取到的子空间信息进行了混合（Mix）与整合
 
 
         ############################################################################
@@ -275,7 +275,7 @@ class TransformerDecoderLayer(nn.Module):
         shortcut = tgt
         tgt = self.self_attn(query=tgt, key=tgt, value=tgt, attn_mask=tgt_mask)
         tgt = self.dropout_self(tgt)
-        tgt = tgt + shortcut
+        tgt = tgt + shortcut #残差
         tgt = self.norm_self(tgt)
 
         ############################################################################
@@ -284,7 +284,19 @@ class TransformerDecoderLayer(nn.Module):
         # memory, and (2) the feedforward block. Each block should follow the      #
         # same structure as self-attention implemented just above.                 #
         ############################################################################
+        # Cross-attention block
+        shortcut = tgt
+        tgt = self.cross_attn(query=tgt,key=memory,value=memory)
+        tgt = self.dropout_cross(tgt)
+        tgt = tgt+shortcut
+        tgt = self.norm_cross(tgt)
 
+        #FFN
+        shortcut = tgt
+        tgt = self.ffn(tgt)
+        tgt = self.dropout_ffn(tgt)
+        tgt = tgt + shortcut
+        tgt = self.norm_ffn(tgt)
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -343,7 +355,11 @@ class PatchEmbedding(nn.Module):
         # step. Once the patches are flattened, embed them into latent vectors     #
         # using the projection layer.                                              #
         ############################################################################
-
+        p =self.patch_size
+        x = x.reshape(N,C,H//p,p,W//p,p)
+        x = torch.permute(x,(0,2,4,1,3,5)) #(N,H//p,W//p,C,p,p)
+        x = torch.reshape(x,(N,self.num_patches,self.patch_dim))
+        out = self.proj(x)
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -391,6 +407,17 @@ class TransformerEncoderLayer(nn.Module):
         # TODO: Implement the encoder layer by applying self-attention followed    #
         # by a feedforward block. This code will be very similar to decoder layer. #
         ############################################################################
+        shortcut = src
+        src = self.self_attn(query=src,key=src,value=src,attn_mask=src_mask)
+        src = self.dropout_self(src)
+        src = src + shortcut
+        src = self.norm_self(src)
+
+        shortcut = src
+        src = self.ffn(src)
+        src = self.dropout_ffn(src)
+        src = src + shortcut
+        src = self.norm_ffn(src)
 
         ############################################################################
         #                             END OF YOUR CODE                             #

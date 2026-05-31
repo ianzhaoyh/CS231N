@@ -19,25 +19,27 @@ class GaussianDiffusion(nn.Module):
         self.model = model
         self.channels = 3
         self.image_size = image_size
-        self.objective = objective
+        self.objective = objective #预测目标
         assert objective in {
             "pred_noise",
             "pred_x_start",
-        }, "objective must be either pred_noise (predict noise) or pred_x_start (predict image start)"
+        }, "objective must be either pred_noise (predict noise) or pred_x_start (predict image start)" 
+        #pred_noise是预测加入的纯噪声，pred_x_start是直接预测原始清晰图像x0
 
         # A helper function to register some constants as buffers to ensure that
         # they are on the same device as model parameters.
         # See https://pytorch.org/docs/stable/generated/torch.nn.Module.html
         # Each buffer can be accessed as `self.name`
-        register_buffer = lambda name, val: self.register_buffer(name, val.float())
+        register_buffer = lambda name, val: self.register_buffer(name, val.float()) 
 
+        #模型中有很多不需要更新梯度，但要参与张量运算的常数，buffer可以将这些常数注册为模型的“状态”
         #############################################################################
         # Noise schedule beta and alpha values
         #############################################################################
-        betas = get_beta_schedule(beta_schedule, timesteps)
+        betas = get_beta_schedule(beta_schedule, timesteps) #每个timestep加入的噪声量，从一个极小值递增到较大值
         self.num_timesteps = int(betas.shape[0])
-        alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)  # alpha_bar_t
+        alphas = 1.0 - betas #保留上一时刻图像信息的比例
+        alphas_cumprod = torch.cumprod(alphas, dim=0)  # alpha_bar_t 累乘积 从第0步直接跨越到第t步时，原始图像信息保留的总比例
         register_buffer("betas", betas)  # can be accessed as self.betas
         register_buffer("alphas", alphas)  # can be accessed as self.alphas
         register_buffer("alphas_cumprod", alphas_cumprod)  # self.alphas_cumprod
@@ -48,9 +50,9 @@ class GaussianDiffusion(nn.Module):
         # x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * noise
         # where noise is sampled from N(0, 1)
         #############################################################################
-        register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
+        register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod)) #sqrt_alphas_cumprod 就是 $\sqrt{\bar{\alpha}_t}$ （$x_0$ 的权重）
         register_buffer(
-            "sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod)
+            "sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod) #噪声低权重
         )
         # register_buffer("sqrt_recip_alphas_cumprod", torch.sqrt(1.0 / alphas_cumprod))
         # register_buffer(
@@ -58,7 +60,7 @@ class GaussianDiffusion(nn.Module):
         # )
 
         #############################################################################
-        # For posterior q(x_{t-1} | x_t, x_0) according to Eq. (6) and (7) of the paper.
+        # For posterior q(x_{t-1} | x_t, x_0) according to Eq. (6) and (7) of the paper. 后验分布的系数
         #############################################################################
         # alpha_bar_{t-1}
         alphas_cumprod_prev = nn.functional.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
@@ -77,14 +79,14 @@ class GaussianDiffusion(nn.Module):
         #################################################################
         # loss weight
         #################################################################
-        snr = alphas_cumprod / (1 - alphas_cumprod)
+        snr = alphas_cumprod / (1 - alphas_cumprod) #信噪比            
         loss_weight = torch.ones_like(snr) if objective == "pred_noise" else snr
         register_buffer("loss_weight", loss_weight)
 
-    def normalize(self, img):
+    def normalize(self, img): #像素值从[0,1]映射到[-1,1]
         return img * 2 - 1
 
-    def unnormalize(self, img):
+    def unnormalize(self, img): #反过来
         return (img + 1) * 0.5
 
     def predict_start_from_noise(self, x_t, t, noise):
@@ -102,7 +104,10 @@ class GaussianDiffusion(nn.Module):
         # Transform x_t and noise to get x_start according to Eq.(4) and Eq.(14).
         # Look at the coeffs in `__init__` method and use the `extract` function.
         ####################################################################
+        sqrt_alphas_cumprod_t = extract(self.sqrt_alphas_cumprod,t,x_t.shape)
+        sqrt_one_minus_alphas_cumprod = extract(self.sqrt_one_minus_alphas_cumprod,t,x_t.shape)
 
+        x_start = x_t / sqrt_alphas_cumprod_t - sqrt_one_minus_alphas_cumprod * noise / sqrt_alphas_cumprod_t
         ####################################################################
         return x_start
 
@@ -121,7 +126,11 @@ class GaussianDiffusion(nn.Module):
         # Transform x_t and noise to get x_start according to Eq.(4) and Eq.(14).
         # Look at the coeffs in `__init__` method and use the `extract` function.
         ####################################################################
+        sqrt_alphas_cumprod_t = extract(self.sqrt_alphas_cumprod,t,x_start.shape)
+        sqrt_one_minus_alphas_cumprod = extract(self.sqrt_one_minus_alphas_cumprod,t,x_start.shape)
 
+        
+        pred_noise = x_t / sqrt_one_minus_alphas_cumprod - sqrt_alphas_cumprod_t * x_start / sqrt_one_minus_alphas_cumprod
         ####################################################################
         return pred_noise
 
@@ -157,7 +166,7 @@ class GaussianDiffusion(nn.Module):
             x_tm1: (b, *) tensor. Sampled image.
         """
         t = torch.full((x_t.shape[0],), t, device=x_t.device, dtype=torch.long)  # (b,)
-        x_tm1 = None  # sample x_{t-1} from p(x_{t-1} | x_t)
+        x_tm1 = None  # sample x_{t-1} from p(x_{t-1} | x_t) 已知x_t，采样得到上一步
 
         ##################################################################
         # TODO: Implement the sampling step p(x_{t-1} | x_t) according to Eq. (6):
@@ -172,7 +181,18 @@ class GaussianDiffusion(nn.Module):
         #   4. Get the mean and std for q(x_{t-1} | x_t, x_0) using self.q_posterior,
         #      and sample x_{t-1}.
         ##################################################################
-        
+        model_output = self.model(x_t,t,model_kwargs)
+
+        if self.objective == "pred_noise":
+            x_start = self.predict_start_from_noise(x_t,t,model_output)
+        else:
+            x_start = model_output #pred_x_start
+
+        x_start = x_start.clamp(-1.0, 1.0)
+
+        mean,std = self.q_posterior(x_start,x_t,t) #后验均值就是x0和xt的加权和
+        noise = torch.randn_like(x_t)
+        x_tm1 = mean+ std * noise #往回走一步
         ##################################################################
 
         return x_tm1
@@ -217,7 +237,10 @@ class GaussianDiffusion(nn.Module):
         # can be done as: x_t = mu + sigma * noise where noise is sampled from N(0, 1).
         # Approximately 3 lines of code.
         ####################################################################
+        sqrt_alphas_cumprod_t = extract(self.sqrt_alphas_cumprod,t,x_start.shape)
+        sqrt_one_minus_alphas_cumprod = extract(self.sqrt_one_minus_alphas_cumprod,t,x_start.shape)
 
+        x_t = sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod * noise
         ####################################################################
         return x_t
 
@@ -238,7 +261,13 @@ class GaussianDiffusion(nn.Module):
         # Finally, compute the weighted MSE loss.
         # Approximately 3-4 lines of code.
         ####################################################################
-
+      
+        x_t = self.q_sample(x_start,t,noise)
+        model_output = self.model(x_t,t,model_kwargs)
+        loss = (model_output - target)**2
+        loss = loss * loss_weight
+        loss = loss.mean()
+        
         ####################################################################
 
         return loss

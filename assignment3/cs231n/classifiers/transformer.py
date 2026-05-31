@@ -20,7 +20,7 @@ class CaptioningTransformer(nn.Module):
                  num_layers=2, max_length=50):
         """
         Construct a new CaptioningTransformer instance.
-
+        文字输入进decoder,图片是encoder输入
         Inputs:
         - word_to_idx: A dictionary giving the vocabulary. It contains V entries.
           and maps each string to a unique integer in the range [0, V).
@@ -88,6 +88,16 @@ class CaptioningTransformer(nn.Module):
         #  3) Finally, apply the decoder features on the text & image embeddings   #
         #     along with the tgt_mask. Project the output to scores per token      #
         ############################################################################
+        embed_caption = self.embedding(captions) #词向量
+        Caption = self.positional_encoding(embed_caption) #位置编码
+
+        f = self.visual_projection(features) # (N,D) --> (N,W)
+        Features = f.unsqueeze(1)
+
+        mask = torch.tril(torch.ones(T,T)).to(features.device)
+
+        out = self.transformer(Caption,Features,mask)
+        scores = self.output(out)
 
         ############################################################################
         #                             END OF YOUR CODE                             #
@@ -240,7 +250,11 @@ class VisionTransformer(nn.Module):
         #    You may find torch.mean useful.                                      #
         # 5. Feed it through a linear layer to produce class logits.              #
         ############################################################################
-
+        patch_sequence = self.patch_embed(x)
+        ps = self.positional_encoding(patch_sequence)
+        out = self.transformer(ps) #(N, num_patches, embed_dim)
+        out  = torch.mean(out,dim=1) #每张图片的索引patch特征相加求平均 (N,embed_dim)
+        logits = self.head(out) #(N,num_classes)
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
